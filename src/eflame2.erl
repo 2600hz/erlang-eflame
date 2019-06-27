@@ -18,6 +18,24 @@
           count=0,
           acc=[]}). % per-process state
 
+%% From https://github.com/tomas-abrahamsson/gpb/issues/134#issuecomment-386892877
+%% Usage:
+%% try
+%%     ...
+%% catch
+%%     error:badarg ->
+%%         whatever;
+%%     ?STACKTRACE(E, R, Stack)
+%%         {error, {E,R, Stack}}
+%% end
+-ifdef(OTP_RELEASE).
+%% >= OTP 21
+-define(STACKTRACE(Type, Reason, Stacktrace), Type:Reason:Stacktrace ->).
+-else.
+%% =< OTP 20
+-define(STACKTRACE(Type, Reason, Stacktrace), Type:Reason -> Stacktrace = erlang:get_stacktrace(), ).
+-endif.
+
 %% For help & use recommendations, run help().
 
 write_trace(Mode, BinaryFile, PidSpec, SleepMSecs) when is_number(SleepMSecs) ->
@@ -173,8 +191,8 @@ exp1_inner({trace_ts, Pid, call, MFA, BIN, TS},
            end,
     %% TODO: more state tracking here.
     S#state{pid=Pid, last_ts=TS, count=Count+1, acc=Acc2}
-  catch XX:YY ->
-            io:format(user, "~p: ~p:~p @ ~p\n", [?LINE, XX, YY, erlang:get_stacktrace()]),
+  catch ?STACKTRACE(XX, YY, St)
+            io:format(user, "~p: ~p:~p @ ~p\n", [?LINE, XX, YY, St]),
             S
   end;
 exp1_inner({trace_ts, _Pid, return_to, MFA, TS}, #state{last_ts=LastTS, acc=Acc} = S) ->
@@ -194,11 +212,11 @@ exp1_inner({trace_ts, _Pid, return_to, MFA, TS}, #state{last_ts=LastTS, acc=Acc}
             {LastStack, LastTime + USec}|Tail],
 %    io:format(user, "return-to: ~p\n", [lists:sublist(Acc2, 4)]),
     S#state{last_ts=TS, acc=Acc2}
-  catch XX:YY ->
-            io:format(user, "~p: ~p:~p @ ~p\n", [?LINE, XX, YY, erlang:get_stacktrace()]),
+  catch ?STACKTRACE(XX, YY, St)
+            io:format(user, "~p: ~p:~p @ ~p\n", [?LINE, XX, YY, St]),
             S
   end;
-    
+
 exp1_inner({trace_ts, _Pid, gc_start, _Info, TS}, #state{last_ts=LastTS, acc=Acc} = S) ->
   try
     %% Push a 0 usec item onto Acc.
@@ -209,8 +227,8 @@ exp1_inner({trace_ts, _Pid, gc_start, _Info, TS}, #state{last_ts=LastTS, acc=Acc
             {LastStack, LastTime + USec}|Tail],
 %    io:format(user, "GC 1: ~p\n", [lists:sublist(Acc2, 4)]),
     S#state{last_ts=TS, acc=Acc2}
-  catch _XX:_YY ->
-            %% io:format(user, "~p: ~p:~p @ ~p\n", [?LINE, _XX, _YY, erlang:get_stacktrace()]),
+  catch ?STACKTRACE(_XX, _YY, _St)
+            %% io:format(user, "~p: ~p:~p @ ~p\n", [?LINE, _XX, _YY, _St)]),
             S
   end;
 exp1_inner({trace_ts, _Pid, gc_end, _Info, TS}, #state{last_ts=LastTS, acc=Acc} = S) ->
@@ -222,8 +240,8 @@ exp1_inner({trace_ts, _Pid, gc_end, _Info, TS}, #state{last_ts=LastTS, acc=Acc} 
     Acc2 = [{LastExecStack, 0}, {GCStack, GCTime + USec}|Tail],
 %    io:format(user, "GC 2: ~p\n", [lists:sublist(Acc2, 4)]),
     S#state{last_ts=TS, acc=Acc2}
-  catch _XX:_YY ->
-            %% io:format(user, "~p: ~p:~p @ ~p\n", [?LINE, _XX, _YY, erlang:get_stacktrace()]),
+  catch ?STACKTRACE(_XX, _YY, _St)
+            %% io:format(user, "~p: ~p:~p @ ~p\n", [?LINE, _XX, _YY, _St)]),
             S
   end;
 
@@ -239,8 +257,8 @@ exp1_inner({trace_ts, _Pid, out, MFA, TS}, #state{last_ts=LastTS, acc=Acc} = S) 
     Acc2 = [{NewStack, 0},
             {LastStack, LastTime + USec}|Tail],
     S#state{last_ts=TS, acc=Acc2}
-  catch XX:YY ->
-            io:format(user, "~p: ~p:~p @ ~p\n", [?LINE, XX, YY, erlang:get_stacktrace()]),
+  catch ?STACKTRACE(XX, YY, St)
+            io:format(user, "~p: ~p:~p @ ~p\n", [?LINE, XX, YY, St]),
             S
   end;
 exp1_inner({trace_ts, _Pid, in, MFA, TS}, #state{last_ts=LastTS, acc=Acc} = S) ->
@@ -254,8 +272,8 @@ exp1_inner({trace_ts, _Pid, in, MFA, TS}, #state{last_ts=LastTS, acc=Acc} = S) -
     USec = timer:now_diff(TS, LastTS),
     Acc2 = [{[MFA_bin|LastExecStack], 0}, {SleepStack, SleepTime + USec}|Tail],
     S#state{last_ts=TS, acc=Acc2}
-  catch XX:YY ->
-            io:format(user, "~p: ~p:~p @ ~p\n", [?LINE, XX, YY, erlang:get_stacktrace()]),
+  catch ?STACKTRACE(XX, YY, St)
+            io:format(user, "~p: ~p:~p @ ~p\n", [?LINE, XX, YY, St]),
             S
   end;
 
@@ -296,7 +314,7 @@ find_matching_stack2(MFA_bin, [{[MFA_bin|_StackTail]=Stack,_Time}|_]) ->
 find_matching_stack2(MFA_bin, [_H|T]) ->
     find_matching_stack2(MFA_bin, T);
 find_matching_stack2(_MFA_bin, []) ->
-    [<<"FIND-MATCHING-FAILED">>].    
+    [<<"FIND-MATCHING-FAILED">>].
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
