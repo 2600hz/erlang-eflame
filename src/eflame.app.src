@@ -1,12 +1,11 @@
 {application, eflame,
  [
-  {description, ""},
+  {description, "Flame Graphs for Erlang"},
   {vsn, git},
   {registered, []},
-  {applications, [
-                  kernel,
+  {applications, [kernel,
                   stdlib
                  ]},
-  {mod, { eflame_app, []}},
+  {mod, {eflame_app, []}},
   {env, []}
  ]}.

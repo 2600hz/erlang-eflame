@@ -8,15 +8,17 @@
 
          %% 2nd phase: convert binary trace to an ASCII trace
          format_trace/1, format_trace/2]).
--export([help/0, custom_trace_flags/0]).
--compile(export_all). %% SLF debugging
+-export([help/0, custom_trace_flags/0
 
--record(state, {
-          output_path="",
-          pid,
-          last_ts,
-          count=0,
-          acc=[]}). % per-process state
+         %% debug helpers?
+        ,exp0/2, entry_to_iolist/1, intercalate/2
+        ]).
+
+-record(state, {output_path="",
+                pid,
+                last_ts,
+                count=0,
+                acc=[]}). % per-process state
 
 %% For help & use recommendations, run help().
 
@@ -76,7 +78,6 @@ stop_trace(Tracer, _PidSpec) ->
     _X00 = dbg:flush_trace_port(),
     (catch dbg:ctp()),
     (catch dbg:stop()),
-    (catch dbg:stop_clear()),
     (exit(Tracer, normal)),
     ok.
 
@@ -108,18 +109,18 @@ exp1_init(OutputPath) ->
     #state{output_path=OutputPath}.
 
 exp1(end_of_trace = _Else, #state{output_path=OutputPath} = OuterS) ->
-    (catch erlang:delete(hello_world)),
+    (catch erlang:put(hello_world, undefined)),
     PidStates = get(),
     {ok, FH} = file:open(OutputPath, [write, raw, binary, delayed_write]),
     io:format("\n\nWriting to ~s for ~w processes... ", [OutputPath, length(PidStates)]),
     [
-        [begin
-             Pid_str0 = lists:flatten(io_lib:format("~w", [Pid])),
-             Size = length(Pid_str0),
-             Pid_str = [$(, lists:sublist(Pid_str0, 2, Size-2), $)],
-             Time_str = integer_to_list(Time),
-             file:write(FH, [Pid_str, $;, intersperse($;, lists:reverse(Stack)), 32, Time_str, 10])
-         end || {Stack, Time} <- Acc]
+     [begin
+          Pid_str0 = lists:flatten(io_lib:format("~w", [Pid])),
+          Size = length(Pid_str0),
+          Pid_str = [$(, lists:sublist(Pid_str0, 2, Size-2), $)],
+          Time_str = integer_to_list(Time),
+          file:write(FH, [Pid_str, $;, intersperse($;, lists:reverse(Stack)), 32, Time_str, 10])
+      end || {Stack, Time} <- Acc]
      || {Pid, #state{acc=Acc} = _S} <- PidStates],
     file:close(FH),
     io:format("finished!\n"),
@@ -149,115 +150,115 @@ exp1_inner({trace_ts, _Pid, Return, _MFA, _TS}, #state{last_ts=undefined} = S)
     %% return_from and return_to, without call context, don't help us
     S;
 exp1_inner({trace_ts, Pid, call, MFA, BIN, TS},
-     #state{last_ts=LastTS, acc=Acc, count=Count} = S) ->
-  try
-    exp1_hello_world(),
-    %% Calculate time elapsed, TS-LastTs.
-    %% 0. If Acc is empty, then skip step #1.
-    %% 1. Credit elapsed time to the stack on the top of Acc.
-    %% 2. Push a 0 usec item with this stack onto Acc.
-    Stak = lists:filter(fun(<<"unknown function">>) -> false;
-                           (_)                      -> true
-                        end, stak_binify(BIN)),
-    Stack0 = stak_trim(Stak),
-    MFA_bin = mfa_binify(MFA),
-    Stack1 = [MFA_bin|lists:reverse(Stack0)],
-    Acc2 = case Acc of
-               [] ->
-                   [{Stack1, 0}];
-               [{LastStack, LastTime}|Tail] ->
-                   USec = timer:now_diff(TS, LastTS),
-%                   io:format("Stack1: ~p ~p\n", [Stack1, USec]),
-                   [{Stack1, 0},
-                    {LastStack, LastTime + USec}|Tail]
-           end,
-    %% TODO: more state tracking here.
-    S#state{pid=Pid, last_ts=TS, count=Count+1, acc=Acc2}
-  catch XX:YY ->
-            io:format(user, "~p: ~p:~p @ ~p\n", [?LINE, XX, YY, erlang:get_stacktrace()]),
+           #state{last_ts=LastTS, acc=Acc, count=Count} = S) ->
+    try
+        exp1_hello_world(),
+        %% Calculate time elapsed, TS-LastTs.
+        %% 0. If Acc is empty, then skip step #1.
+        %% 1. Credit elapsed time to the stack on the top of Acc.
+        %% 2. Push a 0 usec item with this stack onto Acc.
+        Stak = lists:filter(fun(<<"unknown function">>) -> false;
+                               (_)                      -> true
+                            end, stak_binify(BIN)),
+        Stack0 = stak_trim(Stak),
+        MFA_bin = mfa_binify(MFA),
+        Stack1 = [MFA_bin|lists:reverse(Stack0)],
+        Acc2 = case Acc of
+                   [] ->
+                       [{Stack1, 0}];
+                   [{LastStack, LastTime}|Tail] ->
+                       USec = timer:now_diff(TS, LastTS),
+                                                %                   io:format("Stack1: ~p ~p\n", [Stack1, USec]),
+                       [{Stack1, 0},
+                        {LastStack, LastTime + USec}|Tail]
+               end,
+        %% TODO: more state tracking here.
+        S#state{pid=Pid, last_ts=TS, count=Count+1, acc=Acc2}
+    catch XX:YY:ST ->
+            io:format(user, "~p: ~p:~p @ ~p\n", [?LINE, XX, YY, ST]),
             S
-  end;
+    end;
 exp1_inner({trace_ts, _Pid, return_to, MFA, TS}, #state{last_ts=LastTS, acc=Acc} = S) ->
-  try
-    %% Calculate time elapsed, TS-LastTs.
-    %% 1. Credit elapsed time to the stack on the top of Acc.
-    %% 2. Push a 0 usec item with the "best" stack onto Acc.
-    %%    "best" = MFA exists in the middle of the stack onto Acc,
-    %%    or else MFA exists at the top of a stack elsewhere in Acc.
-    [{LastStack, LastTime}|Tail] = Acc,
-    MFA_bin = mfa_binify(MFA),
-    BestStack = lists:dropwhile(fun(SomeMFA) when SomeMFA /= MFA_bin -> true;
-                                   (_)                               -> false
-                                end, find_matching_stack(MFA_bin, Acc)),
-    USec = timer:now_diff(TS, LastTS),
-    Acc2 = [{BestStack, 0},
-            {LastStack, LastTime + USec}|Tail],
-%    io:format(user, "return-to: ~p\n", [lists:sublist(Acc2, 4)]),
-    S#state{last_ts=TS, acc=Acc2}
-  catch XX:YY ->
-            io:format(user, "~p: ~p:~p @ ~p\n", [?LINE, XX, YY, erlang:get_stacktrace()]),
+    try
+        %% Calculate time elapsed, TS-LastTs.
+        %% 1. Credit elapsed time to the stack on the top of Acc.
+        %% 2. Push a 0 usec item with the "best" stack onto Acc.
+        %%    "best" = MFA exists in the middle of the stack onto Acc,
+        %%    or else MFA exists at the top of a stack elsewhere in Acc.
+        [{LastStack, LastTime}|Tail] = Acc,
+        MFA_bin = mfa_binify(MFA),
+        BestStack = lists:dropwhile(fun(SomeMFA) when SomeMFA /= MFA_bin -> true;
+                                       (_)                               -> false
+                                    end, find_matching_stack(MFA_bin, Acc)),
+        USec = timer:now_diff(TS, LastTS),
+        Acc2 = [{BestStack, 0},
+                {LastStack, LastTime + USec}|Tail],
+                                                %    io:format(user, "return-to: ~p\n", [lists:sublist(Acc2, 4)]),
+        S#state{last_ts=TS, acc=Acc2}
+    catch XX:YY:ST ->
+            io:format(user, "~p: ~p:~p @ ~p\n", [?LINE, XX, YY, ST]),
             S
-  end;
-    
+    end;
+
 exp1_inner({trace_ts, _Pid, gc_start, _Info, TS}, #state{last_ts=LastTS, acc=Acc} = S) ->
-  try
-    %% Push a 0 usec item onto Acc.
-    [{LastStack, LastTime}|Tail] = Acc,
-    NewStack = [<<"GARBAGE-COLLECTION">>|LastStack],
-    USec = timer:now_diff(TS, LastTS),
-    Acc2 = [{NewStack, 0},
-            {LastStack, LastTime + USec}|Tail],
-%    io:format(user, "GC 1: ~p\n", [lists:sublist(Acc2, 4)]),
-    S#state{last_ts=TS, acc=Acc2}
-  catch _XX:_YY ->
+    try
+        %% Push a 0 usec item onto Acc.
+        [{LastStack, LastTime}|Tail] = Acc,
+        NewStack = [<<"GARBAGE-COLLECTION">>|LastStack],
+        USec = timer:now_diff(TS, LastTS),
+        Acc2 = [{NewStack, 0},
+                {LastStack, LastTime + USec}|Tail],
+                                                %    io:format(user, "GC 1: ~p\n", [lists:sublist(Acc2, 4)]),
+        S#state{last_ts=TS, acc=Acc2}
+    catch _XX:_YY ->
             %% io:format(user, "~p: ~p:~p @ ~p\n", [?LINE, _XX, _YY, erlang:get_stacktrace()]),
             S
-  end;
+    end;
 exp1_inner({trace_ts, _Pid, gc_end, _Info, TS}, #state{last_ts=LastTS, acc=Acc} = S) ->
-  try
-    %% Push the GC time onto Acc, then push 0 usec item from last exec
-    %% stack onto Acc.
-    [{GCStack, GCTime},{LastExecStack,_}|Tail] = Acc,
-    USec = timer:now_diff(TS, LastTS),
-    Acc2 = [{LastExecStack, 0}, {GCStack, GCTime + USec}|Tail],
-%    io:format(user, "GC 2: ~p\n", [lists:sublist(Acc2, 4)]),
-    S#state{last_ts=TS, acc=Acc2}
-  catch _XX:_YY ->
+    try
+        %% Push the GC time onto Acc, then push 0 usec item from last exec
+        %% stack onto Acc.
+        [{GCStack, GCTime},{LastExecStack,_}|Tail] = Acc,
+        USec = timer:now_diff(TS, LastTS),
+        Acc2 = [{LastExecStack, 0}, {GCStack, GCTime + USec}|Tail],
+                                                %    io:format(user, "GC 2: ~p\n", [lists:sublist(Acc2, 4)]),
+        S#state{last_ts=TS, acc=Acc2}
+    catch _XX:_YY ->
             %% io:format(user, "~p: ~p:~p @ ~p\n", [?LINE, _XX, _YY, erlang:get_stacktrace()]),
             S
-  end;
+    end;
 
 exp1_inner({trace_ts, _Pid, out, MFA, TS}, #state{last_ts=LastTS, acc=Acc} = S) ->
-  try
-    %% Push a 0 usec item onto Acc.
-    %% The MFA reported here probably doesn't appear in the stacktrace
-    %% given to us by the last 'call', so add it here.
-    [{LastStack, LastTime}|Tail] = Acc,
-    MFA_bin = mfa_binify(MFA),
-    NewStack = [<<"SLEEP">>,MFA_bin|LastStack],
-    USec = timer:now_diff(TS, LastTS),
-    Acc2 = [{NewStack, 0},
-            {LastStack, LastTime + USec}|Tail],
-    S#state{last_ts=TS, acc=Acc2}
-  catch XX:YY ->
-            io:format(user, "~p: ~p:~p @ ~p\n", [?LINE, XX, YY, erlang:get_stacktrace()]),
+    try
+        %% Push a 0 usec item onto Acc.
+        %% The MFA reported here probably doesn't appear in the stacktrace
+        %% given to us by the last 'call', so add it here.
+        [{LastStack, LastTime}|Tail] = Acc,
+        MFA_bin = mfa_binify(MFA),
+        NewStack = [<<"SLEEP">>,MFA_bin|LastStack],
+        USec = timer:now_diff(TS, LastTS),
+        Acc2 = [{NewStack, 0},
+                {LastStack, LastTime + USec}|Tail],
+        S#state{last_ts=TS, acc=Acc2}
+    catch XX:YY:ST ->
+            io:format(user, "~p: ~p:~p @ ~p\n", [?LINE, XX, YY, ST]),
             S
-  end;
+    end;
 exp1_inner({trace_ts, _Pid, in, MFA, TS}, #state{last_ts=LastTS, acc=Acc} = S) ->
-  try
-    %% Push the Sleep time onto Acc, then push 0 usec item from last
-    %% exec stack onto Acc.
-    %% The MFA reported here probably doesn't appear in the stacktrace
-    %% given to us by the last 'call', so add it here.
-    MFA_bin = mfa_binify(MFA),
-    [{SleepStack, SleepTime},{LastExecStack,_}|Tail] = Acc,
-    USec = timer:now_diff(TS, LastTS),
-    Acc2 = [{[MFA_bin|LastExecStack], 0}, {SleepStack, SleepTime + USec}|Tail],
-    S#state{last_ts=TS, acc=Acc2}
-  catch XX:YY ->
-            io:format(user, "~p: ~p:~p @ ~p\n", [?LINE, XX, YY, erlang:get_stacktrace()]),
+    try
+        %% Push the Sleep time onto Acc, then push 0 usec item from last
+        %% exec stack onto Acc.
+        %% The MFA reported here probably doesn't appear in the stacktrace
+        %% given to us by the last 'call', so add it here.
+        MFA_bin = mfa_binify(MFA),
+        [{SleepStack, SleepTime},{LastExecStack,_}|Tail] = Acc,
+        USec = timer:now_diff(TS, LastTS),
+        Acc2 = [{[MFA_bin|LastExecStack], 0}, {SleepStack, SleepTime + USec}|Tail],
+        S#state{last_ts=TS, acc=Acc2}
+    catch XX:YY:ST ->
+            io:format(user, "~p: ~p:~p @ ~p\n", [?LINE, XX, YY, ST]),
             S
-  end;
+    end;
 
 exp1_inner(end_of_trace = _Else, #state{pid=Pid, output_path=OutputPath, acc=Acc} = S) ->
     {ok, FH} = file:open(OutputPath, [write, raw, binary, delayed_write]),
@@ -296,7 +297,7 @@ find_matching_stack2(MFA_bin, [{[MFA_bin|_StackTail]=Stack,_Time}|_]) ->
 find_matching_stack2(MFA_bin, [_H|T]) ->
     find_matching_stack2(MFA_bin, T);
 find_matching_stack2(_MFA_bin, []) ->
-    [<<"FIND-MATCHING-FAILED">>].    
+    [<<"FIND-MATCHING-FAILED">>].
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
@@ -307,32 +308,32 @@ help() ->
     io:format("
     Usage: 1st phase: Generate a binary trace
 
-        ~s:write_trace(Mode, BinaryFile, PidSpec, SleepMSecs)
-        ~s:write_trace(Mode, BinaryFile, PidSpec, M, F, A)
+              ~s:write_trace(Mode, BinaryFile, PidSpec, SleepMSecs)
+              ~s:write_trace(Mode, BinaryFile, PidSpec, M, F, A)
         %% The following forms used with experimental VM only!
-        ~s:write_trace_exp(Mode, BinaryFile, PidSpec, SleepMSecs)
-        ~s:write_trace_exp(Mode, BinaryFile, PidSpec, M, F, A)
+              ~s:write_trace_exp(Mode, BinaryFile, PidSpec, SleepMSecs)
+              ~s:write_trace_exp(Mode, BinaryFile, PidSpec, M, F, A)
 
-    Mode = 'global_calls' | 'global_calls_plus_new_procs' |
-           'global_and_local_calls' | 'global_and_local_calls_plus_new_procs' |
-           erlang_trace_flags()
-    erlang_trace_flags() = See OTP docs for erlang:trace() BIF
+              Mode = 'global_calls' | 'global_calls_plus_new_procs' |
+              'global_and_local_calls' | 'global_and_local_calls_plus_new_procs' |
+              erlang_trace_flags()
+              erlang_trace_flags() = See OTP docs for erlang:trace() BIF
 
-    PidSpec = 'all' | 'existing' | 'new' | pid() | [pid()]
+              PidSpec = 'all' | 'existing' | 'new' | pid() | [pid()]
 
-    To trace current pid and execution of {M,F,A} only, we suggest:
-        ~s:write_trace(Mode, BinaryFile, self(), M, F, A)
+              To trace current pid and execution of {M,F,A} only, we suggest:
+                  ~s:write_trace(Mode, BinaryFile, self(), M, F, A)
 
-    To trace all pids and gather traces on all pids for some time, we suggest:
-        ~s:write_trace(Mode, BinaryFile, PidSpec, SleepMSecs)
+              To trace all pids and gather traces on all pids for some time, we suggest:
+                  ~s:write_trace(Mode, BinaryFile, PidSpec, SleepMSecs)
 
-    Usage: 2nd phase: Convert a binary trace to an ASCII trace
+              Usage: 2nd phase: Convert a binary trace to an ASCII trace
 
-        ~s:format_trace(BinaryFile).  % output = input ++ \".out\"
-      or else
-        ~s:format_trace(BinaryFile, OutputFile).
+              ~s:format_trace(BinaryFile).  % output = input ++ \".out\"
+or else
+       ~s:format_trace(BinaryFile, OutputFile).
 
-        Remember to wait for 'finished!' message!
+Remember to wait for 'finished!' message!
 ", [?MODULE || _ <- lists:seq(1, 8)]).
 
 trace_flags(Mode) when Mode == global_calls; Mode == global_and_local_calls ->
@@ -378,26 +379,26 @@ mfa_binify(X) ->
 %% Borrowed from redbug.erl
 
 stak(Bin) ->
-  lists:foldl(fun munge/2,[],string:tokens(binary_to_list(Bin),"\n")).
+    lists:foldl(fun munge/2,[],string:tokens(binary_to_list(Bin),"\n")).
 
 munge(I,Out) ->
-  case I of %% lists:reverse(I) of
-    "..."++_ -> ["truncated!!!"|Out];
-    _ ->
-      case string:str(I, "Return addr") of
-        0 ->
-          case string:str(I, "cp = ") of
-            0 -> Out;
-            _ -> [mfaf(I)|Out]
-          end;
+    case I of %% lists:reverse(I) of
+        "..."++_ -> ["truncated!!!"|Out];
         _ ->
-          case string:str(I, "erminate process normal") of
-            0 -> [mfaf(I)|Out];
-            _ -> Out
-          end
-      end
-  end.
+            case string:str(I, "Return addr") of
+                0 ->
+                    case string:str(I, "cp = ") of
+                        0 -> Out;
+                        _ -> [mfaf(I)|Out]
+                    end;
+                _ ->
+                    case string:str(I, "erminate process normal") of
+                        0 -> [mfaf(I)|Out];
+                        _ -> Out
+                    end
+            end
+    end.
 
 mfaf(I) ->
-  [_, C|_] = string:tokens(I,"()+"),
-  string:strip(C).
+    [_, C|_] = string:tokens(I,"()+"),
+    string:strip(C).

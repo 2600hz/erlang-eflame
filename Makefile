@@ -1,7 +1,12 @@
 
 all:
-	mkdir -p ebin
-	erlc -o ebin src/*.erl
+	rebar3 compile
+
+xref:
+	rebar3 xref
+
+dialyze:
+	rebar3 dialyzer
 
 clean:
-	rm -f ebin/*.beam
+	rebar3 clean
